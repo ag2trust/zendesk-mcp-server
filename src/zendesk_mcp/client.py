@@ -43,16 +43,32 @@ class ZendeskClient:
             "Authorization": f"Basic {creds}",
             "Content-Type": "application/json",
         }
+        self._http_client: httpx.AsyncClient | None = None
 
     def __repr__(self) -> str:
         return f"ZendeskClient(subdomain={self.subdomain!r})"
 
-    def _client(self) -> httpx.AsyncClient:
+    _ALLOWED_METHODS = {"get", "post", "put", "delete"}
+
+    def __init_http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self.base_url,
             headers=self._headers,
             timeout=30.0,
         )
+
+    @property
+    def _http(self) -> httpx.AsyncClient:
+        """Lazy-initialized persistent HTTP client."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = self.__init_http_client()
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     @staticmethod
     def _validate_ticket_id(ticket_id: int) -> int:
@@ -63,13 +79,14 @@ class ZendeskClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         """Make an API request with safe error handling."""
-        async with self._client() as client:
-            resp = await getattr(client, method)(path, **kwargs)
-            if resp.is_error:
-                raise ZendeskError(
-                    f"Zendesk API error: {resp.status_code} on {method.upper()} {path}"
-                )
-            return resp
+        if method not in self._ALLOWED_METHODS:
+            raise ValueError(f"HTTP method {method!r} not allowed")
+        resp = await getattr(self._http, method)(path, **kwargs)
+        if resp.is_error:
+            raise ZendeskError(
+                f"Zendesk API error: {resp.status_code} on {method.upper()} {path}"
+            )
+        return resp
 
     async def create_ticket(
         self,

@@ -49,6 +49,7 @@ Set your credentials as environment variables and start the server:
 export ZENDESK_SUBDOMAIN=acme
 export ZENDESK_EMAIL=agent@acme.com
 export ZENDESK_API_TOKEN=your_api_token
+export ZENDESK_MCP_AUTH_TOKEN=a-secret-bearer-token
 
 # HTTP server (default) — for use with MCP gateways and remote clients
 zendesk-mcp
@@ -57,12 +58,15 @@ zendesk-mcp
 zendesk-mcp --transport stdio
 ```
 
+In HTTP mode, `ZENDESK_MCP_AUTH_TOKEN` is required. Clients must include `Authorization: Bearer <token>` on every request. To explicitly disable auth (e.g. local development), pass `--no-auth`.
+
 Options:
 
 ```
 --transport    stdio | streamable-http (default: streamable-http)
 --host         Host to bind to (default: 0.0.0.0)
 --port         Port to bind to (default: 8000)
+--no-auth      Disable bearer token auth (not recommended for production)
 ```
 
 ### Docker
@@ -74,6 +78,7 @@ docker run -p 8000:8000 \
   -e ZENDESK_SUBDOMAIN=acme \
   -e ZENDESK_EMAIL=agent@acme.com \
   -e ZENDESK_API_TOKEN=your_api_token \
+  -e ZENDESK_MCP_AUTH_TOKEN=a-secret-bearer-token \
   zendesk-mcp-server
 ```
 

@@ -1,6 +1,8 @@
-"""Tests for MCP server tool registration."""
+"""Tests for MCP server tool registration and auth middleware."""
 
-from zendesk_mcp.server import mcp
+import pytest
+
+from zendesk_mcp.server import mcp, BearerAuthMiddleware
 
 
 def test_tools_registered():
@@ -31,3 +33,73 @@ def test_summarize_ticket():
     assert result["id"] == 42
     assert result["subject"] == "Test"
     assert "extra_field" not in result
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_rejects_no_token():
+    """Requests without a bearer token get 401."""
+    responses = []
+
+    async def mock_send(message):
+        responses.append(message)
+
+    middleware = BearerAuthMiddleware(app=None, token="secret123")
+    scope = {"type": "http", "headers": []}
+
+    await middleware(scope, None, mock_send)
+
+    body = next(r for r in responses if r.get("type") == "http.response.body")
+    assert b"Unauthorized" in body["body"]
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_rejects_wrong_token():
+    """Requests with a wrong bearer token get 401."""
+    responses = []
+
+    async def mock_send(message):
+        responses.append(message)
+
+    middleware = BearerAuthMiddleware(app=None, token="secret123")
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer wrong-token")],
+    }
+
+    await middleware(scope, None, mock_send)
+
+    body = next(r for r in responses if r.get("type") == "http.response.body")
+    assert b"Unauthorized" in body["body"]
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_passes_valid_token():
+    """Requests with the correct bearer token pass through."""
+    called = []
+
+    async def mock_app(scope, receive, send):
+        called.append(True)
+
+    middleware = BearerAuthMiddleware(app=mock_app, token="secret123")
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer secret123")],
+    }
+
+    await middleware(scope, None, None)
+    assert called == [True]
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_skips_non_http():
+    """Non-HTTP scopes (e.g. lifespan) pass through without auth check."""
+    called = []
+
+    async def mock_app(scope, receive, send):
+        called.append(True)
+
+    middleware = BearerAuthMiddleware(app=mock_app, token="secret123")
+    scope = {"type": "lifespan"}
+
+    await middleware(scope, None, None)
+    assert called == [True]

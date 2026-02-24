@@ -1,5 +1,8 @@
 """Zendesk MCP server — exposes ticket management tools via the Model Context Protocol."""
 
+import hmac
+import os
+
 from mcp.server.fastmcp import FastMCP
 
 from zendesk_mcp.client import ZendeskClient
@@ -150,8 +153,37 @@ async def search_tickets(
     return [_summarize_ticket(t) for t in results]
 
 
+class BearerAuthMiddleware:
+    """ASGI middleware that requires a valid Bearer token on every HTTP request."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self._token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"").decode()
+
+            valid = (
+                auth_header.startswith("Bearer ")
+                and hmac.compare_digest(auth_header[7:], self._token)
+            )
+            if not valid:
+                from starlette.responses import JSONResponse
+
+                response = JSONResponse(
+                    {"error": "Unauthorized"}, status_code=401
+                )
+                await response(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
+
+
 def main():
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Zendesk MCP Server")
     parser.add_argument(
@@ -166,11 +198,45 @@ def main():
     parser.add_argument(
         "--port", type=int, default=8000, help="Port to bind to (default: 8000)"
     )
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Disable bearer token auth (NOT recommended for production)",
+    )
     args = parser.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    auth_token = os.environ.get("ZENDESK_MCP_AUTH_TOKEN")
+
+    if not auth_token and not args.no_auth:
+        print(
+            "Error: ZENDESK_MCP_AUTH_TOKEN env var is required for HTTP transport.\n"
+            "Set it to a secret bearer token, or pass --no-auth to disable "
+            "(not recommended for production).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     mcp.settings.host = args.host
     mcp.settings.port = args.port
-    mcp.run(transport=args.transport)
+
+    if auth_token:
+        import anyio
+        import uvicorn
+
+        async def _run_with_auth():
+            app = mcp.streamable_http_app()
+            app = BearerAuthMiddleware(app, auth_token)
+            config = uvicorn.Config(app, host=args.host, port=args.port)
+            server = uvicorn.Server(config)
+            await server.serve()
+
+        anyio.run(_run_with_auth)
+    else:
+        mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":

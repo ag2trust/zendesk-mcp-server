@@ -84,3 +84,19 @@ def test_validate_ticket_id_rejects_bad_values():
 
 def test_validate_ticket_id_accepts_positive_int():
     assert ZendeskClient._validate_ticket_id(42) == 42
+
+
+def test_persistent_http_client():
+    """HTTP client is reused across property accesses."""
+    client = ZendeskClient(subdomain="test", email="u@t.com", api_token="tok")
+    http1 = client._http
+    http2 = client._http
+    assert http1 is http2
+
+
+def test_disallowed_http_method():
+    """Only get/post/put/delete are allowed."""
+    client = ZendeskClient(subdomain="test", email="u@t.com", api_token="tok")
+    with pytest.raises(ValueError, match="not allowed"):
+        import asyncio
+        asyncio.run(client._request("patch", "/foo"))
