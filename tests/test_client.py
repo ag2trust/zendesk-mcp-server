@@ -29,7 +29,7 @@ def test_client_init_from_env(monkeypatch):
 
 
 def test_client_init_missing_env_raises():
-    with pytest.raises(KeyError):
+    with pytest.raises((KeyError, ValueError)):
         ZendeskClient()
 
 
@@ -100,3 +100,62 @@ def test_disallowed_http_method():
     with pytest.raises(ValueError, match="not allowed"):
         import asyncio
         asyncio.run(client._request("patch", "/foo"))
+
+
+# --- Bearer auth mode ---
+
+
+def test_bearer_auth_mode():
+    """Bearer mode uses Authorization: Bearer header, no email required."""
+    client = ZendeskClient(
+        subdomain="test",
+        auth_mode="bearer",
+        access_token="oauth-token-123",
+    )
+    assert client.base_url == "https://test.zendesk.com/api/v2"
+    assert client._headers["Authorization"] == "Bearer oauth-token-123"
+
+
+def test_bearer_auth_mode_missing_token_raises():
+    """Bearer mode requires access_token."""
+    with pytest.raises(ValueError, match="access_token.*required"):
+        ZendeskClient(subdomain="test", auth_mode="bearer")
+
+
+def test_bearer_auth_mode_no_email_required():
+    """Bearer mode does not require email or api_token."""
+    client = ZendeskClient(
+        subdomain="test",
+        auth_mode="bearer",
+        access_token="tok",
+    )
+    assert "Basic" not in client._headers["Authorization"]
+
+
+def test_bearer_repr_does_not_leak_token():
+    """Bearer token must not appear in repr."""
+    client = ZendeskClient(
+        subdomain="test",
+        auth_mode="bearer",
+        access_token="super-secret-token",
+    )
+    r = repr(client)
+    assert "super-secret-token" not in r
+    assert "test" in r
+
+
+def test_invalid_auth_mode_raises():
+    """Only 'basic' and 'bearer' are valid auth modes."""
+    with pytest.raises(ValueError, match="auth_mode"):
+        ZendeskClient(
+            subdomain="test",
+            email="u@t.com",
+            api_token="tok",
+            auth_mode="digest",
+        )
+
+
+def test_basic_auth_mode_is_default():
+    """Default auth_mode is 'basic', preserving backward compat."""
+    client = ZendeskClient(subdomain="test", email="u@t.com", api_token="tok")
+    assert client._headers["Authorization"].startswith("Basic ")

@@ -26,10 +26,15 @@ class ZendeskClient:
         subdomain: str | None = None,
         email: str | None = None,
         api_token: str | None = None,
+        auth_mode: str = "basic",
+        access_token: str | None = None,
     ):
-        self.subdomain = (subdomain or "").strip() or os.environ["ZENDESK_SUBDOMAIN"]
-        email = (email or "").strip() or os.environ["ZENDESK_EMAIL"]
-        api_token = (api_token or "").strip() or os.environ["ZENDESK_API_TOKEN"]
+        if auth_mode not in ("basic", "bearer"):
+            raise ValueError(f"auth_mode must be 'basic' or 'bearer', got {auth_mode!r}")
+
+        self.subdomain = (subdomain or "").strip() or os.environ.get("ZENDESK_SUBDOMAIN", "")
+        if not self.subdomain:
+            raise ValueError("subdomain is required (via argument or ZENDESK_SUBDOMAIN env var)")
 
         if not _SUBDOMAIN_RE.match(self.subdomain):
             raise ValueError(
@@ -38,11 +43,24 @@ class ZendeskClient:
             )
 
         self.base_url = f"https://{self.subdomain}.zendesk.com/api/v2"
-        creds = base64.b64encode(f"{email}/token:{api_token}".encode()).decode()
-        self._headers = {
-            "Authorization": f"Basic {creds}",
-            "Content-Type": "application/json",
-        }
+        self._auth_mode = auth_mode
+
+        if auth_mode == "bearer":
+            if not access_token:
+                raise ValueError("access_token is required when auth_mode='bearer'")
+            self._headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+        else:
+            email = (email or "").strip() or os.environ["ZENDESK_EMAIL"]
+            api_token = (api_token or "").strip() or os.environ["ZENDESK_API_TOKEN"]
+            creds = base64.b64encode(f"{email}/token:{api_token}".encode()).decode()
+            self._headers = {
+                "Authorization": f"Basic {creds}",
+                "Content-Type": "application/json",
+            }
+
         self._http_client: httpx.AsyncClient | None = None
 
     def __repr__(self) -> str:
