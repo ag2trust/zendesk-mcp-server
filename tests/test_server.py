@@ -125,11 +125,11 @@ def test_extract_credentials_missing_headers_returns_none():
     assert creds is None
 
 
-def test_extract_credentials_partial_headers_returns_none():
-    """Both headers required — partial returns None."""
+def test_extract_credentials_partial_headers_raises():
+    """Both headers required — partial raises ValueError."""
     headers = [(b"x-zendesk-token", b"tok")]
-    creds = _extract_request_credentials(headers)
-    assert creds is None
+    with pytest.raises(ValueError, match="Both.*required"):
+        _extract_request_credentials(headers)
 
 
 def test_extract_credentials_validates_subdomain():

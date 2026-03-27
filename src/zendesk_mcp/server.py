@@ -3,11 +3,10 @@
 import contextvars
 import hmac
 import os
-import re
 
 from mcp.server.fastmcp import FastMCP
 
-from zendesk_mcp.client import ZendeskClient
+from zendesk_mcp.client import ZendeskClient, _SUBDOMAIN_RE
 
 mcp = FastMCP("Zendesk")
 
@@ -18,8 +17,6 @@ _request_credentials: contextvars.ContextVar[dict | None] = contextvars.ContextV
     "_request_credentials", default=None
 )
 
-_SUBDOMAIN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]*$")
-
 
 def _extract_request_credentials(headers: list[tuple[bytes, bytes]]) -> dict | None:
     """Extract per-request Zendesk credentials from HTTP headers.
@@ -29,17 +26,29 @@ def _extract_request_credentials(headers: list[tuple[bytes, bytes]]) -> dict | N
 
     Returns:
         dict with 'access_token' and 'subdomain' if both headers present,
-        None if neither is present. Raises ValueError if subdomain is invalid.
+        None if neither is present. Raises ValueError if subdomain is invalid
+        or if header values are not valid UTF-8.
     """
     header_dict = {k.lower(): v for k, v in headers}
-    token = header_dict.get(b"x-zendesk-token", b"").decode().strip()
-    subdomain = header_dict.get(b"x-zendesk-subdomain", b"").decode().strip()
+    raw_token = header_dict.get(b"x-zendesk-token", b"")
+    raw_subdomain = header_dict.get(b"x-zendesk-subdomain", b"")
+
+    try:
+        token = raw_token.decode("utf-8").strip()
+        subdomain = raw_subdomain.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "Invalid encoding for Zendesk credential headers; values must be valid UTF-8."
+        ) from exc
 
     if not token and not subdomain:
         return None
 
     if not token or not subdomain:
-        return None
+        raise ValueError(
+            "Both X-Zendesk-Token and X-Zendesk-Subdomain headers are required. "
+            "Received only one."
+        )
 
     if not _SUBDOMAIN_RE.match(subdomain):
         raise ValueError(
@@ -59,7 +68,13 @@ def _get_client() -> ZendeskClient:
 
 
 def _get_client_for_request() -> ZendeskClient:
-    """Get a ZendeskClient using per-request creds (if set) or env-var fallback."""
+    """Get a ZendeskClient using per-request creds (if set) or env-var fallback.
+
+    Per-request clients use the shared httpx.AsyncClient from the global client
+    when possible, but for bearer auth a new client is created per-request.
+    The client is stored in the contextvar and closed by the middleware after
+    the request completes.
+    """
     creds = _request_credentials.get()
     if creds:
         return ZendeskClient(
@@ -209,26 +224,35 @@ class CredentialExtractionMiddleware:
 
     When X-Zendesk-Token and X-Zendesk-Subdomain headers are present, sets
     them in a contextvar so tool handlers can create per-request clients.
+    Resets the contextvar after the request completes to prevent cross-tenant
+    credential bleed.
     """
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = scope.get("headers", [])
-            try:
-                creds = _extract_request_credentials(headers)
-            except ValueError:
-                from starlette.responses import JSONResponse
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-                response = JSONResponse(
-                    {"error": "Invalid X-Zendesk-Subdomain header"}, status_code=400
-                )
-                await response(scope, receive, send)
-                return
-            _request_credentials.set(creds)
-        await self.app(scope, receive, send)
+        headers = scope.get("headers", [])
+        try:
+            creds = _extract_request_credentials(headers)
+        except ValueError:
+            from starlette.responses import JSONResponse
+
+            response = JSONResponse(
+                {"error": "Invalid X-Zendesk-Subdomain header"}, status_code=400
+            )
+            await response(scope, receive, send)
+            return
+
+        token = _request_credentials.set(creds)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _request_credentials.reset(token)
 
 
 class BearerAuthMiddleware:
@@ -315,7 +339,17 @@ def main():
 
         anyio.run(_run_with_auth)
     else:
-        mcp.run(transport="streamable-http")
+        import anyio
+        import uvicorn
+
+        async def _run_no_auth():
+            app = mcp.streamable_http_app()
+            app = CredentialExtractionMiddleware(app)  # Still extract per-request creds
+            config = uvicorn.Config(app, host=args.host, port=args.port)
+            server = uvicorn.Server(config)
+            await server.serve()
+
+        anyio.run(_run_no_auth)
 
 
 if __name__ == "__main__":

@@ -43,13 +43,13 @@ class ZendeskClient:
             )
 
         self.base_url = f"https://{self.subdomain}.zendesk.com/api/v2"
-        self._auth_mode = auth_mode
 
         if auth_mode == "bearer":
-            if not access_token:
+            normalized_token = (access_token or "").strip()
+            if not normalized_token:
                 raise ValueError("access_token is required when auth_mode='bearer'")
             self._headers = {
-                "Authorization": f"Bearer {access_token}",
+                "Authorization": f"Bearer {normalized_token}",
                 "Content-Type": "application/json",
             }
         else:
