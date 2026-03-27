@@ -2,7 +2,7 @@
 
 import pytest
 
-from zendesk_mcp.server import mcp, BearerAuthMiddleware
+from zendesk_mcp.server import mcp, BearerAuthMiddleware, _extract_request_credentials
 
 
 def test_tools_registered():
@@ -103,3 +103,53 @@ async def test_auth_middleware_skips_non_http():
 
     await middleware(scope, None, None)
     assert called == [True]
+
+
+# --- Per-request credential extraction ---
+
+
+def test_extract_credentials_from_headers():
+    """X-Zendesk-Token and X-Zendesk-Subdomain headers are extracted."""
+    headers = [
+        (b"x-zendesk-token", b"oauth-tok-123"),
+        (b"x-zendesk-subdomain", b"acme"),
+    ]
+    creds = _extract_request_credentials(headers)
+    assert creds == {"access_token": "oauth-tok-123", "subdomain": "acme"}
+
+
+def test_extract_credentials_missing_headers_returns_none():
+    """Returns None when neither credential header is present."""
+    headers = [(b"authorization", b"Bearer transport-token")]
+    creds = _extract_request_credentials(headers)
+    assert creds is None
+
+
+def test_extract_credentials_partial_headers_raises():
+    """Both headers required — partial raises ValueError."""
+    headers = [(b"x-zendesk-token", b"tok")]
+    with pytest.raises(ValueError, match="Both.*required"):
+        _extract_request_credentials(headers)
+
+
+def test_extract_credentials_validates_subdomain():
+    """Invalid subdomain in header is rejected."""
+    headers = [
+        (b"x-zendesk-token", b"tok"),
+        (b"x-zendesk-subdomain", b"evil.com"),
+    ]
+    with pytest.raises(ValueError, match="Invalid Zendesk subdomain"):
+        _extract_request_credentials(headers)
+
+
+def test_extract_credentials_token_not_logged(caplog):
+    """Tokens from headers must not appear in log output."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG):
+        headers = [
+            (b"x-zendesk-token", b"super-secret-oauth-token"),
+            (b"x-zendesk-subdomain", b"acme"),
+        ]
+        _extract_request_credentials(headers)
+    assert "super-secret-oauth-token" not in caplog.text
