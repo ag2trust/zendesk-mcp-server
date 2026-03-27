@@ -1,7 +1,9 @@
 """Zendesk MCP server — exposes ticket management tools via the Model Context Protocol."""
 
+import contextvars
 import hmac
 import os
+import re
 
 from mcp.server.fastmcp import FastMCP
 
@@ -11,12 +13,61 @@ mcp = FastMCP("Zendesk")
 
 _client: ZendeskClient | None = None
 
+# Per-request credentials set by CredentialExtractionMiddleware
+_request_credentials: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_request_credentials", default=None
+)
+
+_SUBDOMAIN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]*$")
+
+
+def _extract_request_credentials(headers: list[tuple[bytes, bytes]]) -> dict | None:
+    """Extract per-request Zendesk credentials from HTTP headers.
+
+    Args:
+        headers: ASGI-style list of (name, value) byte tuples.
+
+    Returns:
+        dict with 'access_token' and 'subdomain' if both headers present,
+        None if neither is present. Raises ValueError if subdomain is invalid.
+    """
+    header_dict = {k.lower(): v for k, v in headers}
+    token = header_dict.get(b"x-zendesk-token", b"").decode().strip()
+    subdomain = header_dict.get(b"x-zendesk-subdomain", b"").decode().strip()
+
+    if not token and not subdomain:
+        return None
+
+    if not token or not subdomain:
+        return None
+
+    if not _SUBDOMAIN_RE.match(subdomain):
+        raise ValueError(
+            f"Invalid Zendesk subdomain: {subdomain!r}. "
+            "Must contain only alphanumeric characters and hyphens."
+        )
+
+    return {"access_token": token, "subdomain": subdomain}
+
 
 def _get_client() -> ZendeskClient:
+    """Get or create the global ZendeskClient from env vars (static mode)."""
     global _client
     if _client is None:
         _client = ZendeskClient()
     return _client
+
+
+def _get_client_for_request() -> ZendeskClient:
+    """Get a ZendeskClient using per-request creds (if set) or env-var fallback."""
+    creds = _request_credentials.get()
+    if creds:
+        return ZendeskClient(
+            subdomain=creds["subdomain"],
+            auth_mode="bearer",
+            access_token=creds["access_token"],
+        )
+    return _get_client()
 
 
 def _summarize_ticket(t: dict) -> dict:
@@ -57,7 +108,7 @@ async def create_ticket(
         requester_email: Email of the person who requested the ticket.
         assignee_email: Email of the agent to assign the ticket to.
     """
-    ticket = await _get_client().create_ticket(
+    ticket = await _get_client_for_request().create_ticket(
         subject=subject,
         description=description,
         priority=priority,
@@ -76,7 +127,7 @@ async def get_ticket(ticket_id: int) -> dict:
     Args:
         ticket_id: The numeric Zendesk ticket ID.
     """
-    ticket = await _get_client().get_ticket(ticket_id)
+    ticket = await _get_client_for_request().get_ticket(ticket_id)
     return _summarize_ticket(ticket)
 
 
@@ -97,7 +148,7 @@ async def update_ticket(
         assignee_email: Email of the agent to reassign to.
         tags: Replace current tags with this list.
     """
-    ticket = await _get_client().update_ticket(
+    ticket = await _get_client_for_request().update_ticket(
         ticket_id=ticket_id,
         status=status,
         priority=priority,
@@ -120,7 +171,7 @@ async def add_comment(
         body: The comment text.
         public: True for a public reply visible to the requester, False for an internal note.
     """
-    ticket = await _get_client().add_comment(
+    ticket = await _get_client_for_request().add_comment(
         ticket_id=ticket_id,
         body=body,
         public=public,
@@ -145,12 +196,39 @@ async def search_tickets(
         sort_by: Field to sort by. Defaults to updated_at.
         sort_order: Sort direction — "asc" or "desc". Defaults to desc.
     """
-    results = await _get_client().search_tickets(
+    results = await _get_client_for_request().search_tickets(
         query=query,
         sort_by=sort_by,
         sort_order=sort_order,
     )
     return [_summarize_ticket(t) for t in results]
+
+
+class CredentialExtractionMiddleware:
+    """ASGI middleware that extracts Zendesk credentials from request headers.
+
+    When X-Zendesk-Token and X-Zendesk-Subdomain headers are present, sets
+    them in a contextvar so tool handlers can create per-request clients.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = scope.get("headers", [])
+            try:
+                creds = _extract_request_credentials(headers)
+            except ValueError:
+                from starlette.responses import JSONResponse
+
+                response = JSONResponse(
+                    {"error": "Invalid X-Zendesk-Subdomain header"}, status_code=400
+                )
+                await response(scope, receive, send)
+                return
+            _request_credentials.set(creds)
+        await self.app(scope, receive, send)
 
 
 class BearerAuthMiddleware:
@@ -229,7 +307,8 @@ def main():
 
         async def _run_with_auth():
             app = mcp.streamable_http_app()
-            app = BearerAuthMiddleware(app, auth_token)
+            app = CredentialExtractionMiddleware(app)  # Inner: extract creds
+            app = BearerAuthMiddleware(app, auth_token)  # Outer: check transport auth
             config = uvicorn.Config(app, host=args.host, port=args.port)
             server = uvicorn.Server(config)
             await server.serve()
